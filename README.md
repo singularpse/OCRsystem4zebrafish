@@ -23,4 +23,4 @@ To install and run the customised automatic feeding system:
 
 
 
-#### *our work [homepage](www.yangpeng.me/2018/10/18/OCR-system/)*
+#### *Our work [homepage](www.yangpeng.me/2018/10/18/OCR-system/)*
