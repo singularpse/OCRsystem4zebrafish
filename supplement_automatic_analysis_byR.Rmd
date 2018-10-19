@@ -1,0 +1,420 @@
+---
+title: "Supplement: demonstration_automatic_analysis_byR"
+author: "PENG YANG"
+date: "10/1/2018"
+output: 
+  pdf_document: 
+    highlight: monochrome
+---
+
+
+```{r, message=FALSE, warning=FALSE}
+suppressMessages(library("tidyverse"))
+library(ggpubr)
+library(cowplot)
+library(ggthemes)
+library(zoo)
+```
+
+# Raw data import and manipulation
+## import young data
+
+```{r, message=FALSE, warning=FALSE}
+rm(list=ls())
+
+## distance data tidy
+
+get_distance_data <- function(data_path, fileName){
+  read.table(file.path(data_path, fileName), sep = ",", 
+                     fileEncoding = "UCS-2LE", 
+                     header = T, 
+                     fill = T, 
+                     na.strings = "-",
+                     skip = 34
+                     ) %>%
+            filter(row_number() != 1) %>%
+  mutate(fileName_temp = fileName) %>%
+  mutate(#Group = str_extract(fileName_temp, "[a-zA-Z]*OF"),
+         UniID = str_extract(fileName_temp, "\\d*(?=-Subject)"),
+         # ID = paste0(Group, "_", str_extract(fileName_temp, "(?<=OF)\\d"), "_", str_extract(fileName_temp, "(?<=Arena )\\d")),
+         Distance.moved = na.spline(as.numeric(as.character(Distance.moved))),
+         Recording.time = as.numeric(as.character(Recording.time))
+         ) %>%
+  select(UniID, Recording.time, Distance.moved) %>%
+  arrange(Recording.time) %>%
+  mutate(distance.2min = c(rep(NA, 599), rollsum(Distance.moved, 600))) %>%
+  filter(row_number() %% 600 == 0) %>%
+  arrange(Recording.time) %>%
+  mutate(Period = row_number() *2) %>%
+  filter(Period %in% seq(10, 60, 2)) %>%
+  select(UniID, Recording.time, distance.2min, Period)
+}
+
+
+data_path <- "input/young/Distance/"   # path to the data
+files <- dir(data_path, pattern = "*.txt") # get file names
+
+raw.dis.5M <- data_frame(fileName = files) %>% 
+  mutate(file_contents = map(fileName, ~ get_distance_data(data_path, .)) ) %>%
+  unnest()
+
+data.ts.dis.5M <- raw.dis.5M %>%
+  select(-fileName)
+
+
+
+## DO Data tidy
+# rm(list=ls())
+data_base.5M <- read.csv("input/young/raw.ID/ID.csv") %>%
+  mutate(BMI = Mass/(Length)^2)
+
+target <- data_base.5M$OCR_ID
+
+data_do_path <- "input/young/DO"   # path to the data
+files <- dir(data_do_path, pattern = "*.csv") # get file names
+
+# no auxiliary information
+raw.oc.5M <- files %>%
+  # read in all the files, appending the path before the filename
+  map(~ read_csv(file.path(data_do_path, .))) %>% 
+  reduce(rbind) %>%
+  mutate(Date.Time = 'Date/Time',
+         Device.serial = 'Device serial')
+raw.oc.5M
+
+raw.oc.5M <- raw.oc.5M %>%
+  filter(ID %in% target) %>%
+  arrange(ID, Date.Time) %>%
+  select(OCR_ID = ID, DO = Value, Temperature = Value2, Date.Time, Device.serial)
+
+raw.oc.t3410.5M <- raw.oc.5M %>%
+  filter(Device.serial == 15390906) %>%
+  group_by(OCR_ID) %>%
+  arrange(Date.Time) %>%
+  slice(4:n()-1)
+  
+raw.oc.t3510.5M <- raw.oc.5M %>%
+  filter(Device.serial != 15390906) %>%
+  group_by(OCR_ID) %>%
+  arrange(Date.Time) %>%  
+  slice(3:n()-1)
+
+raw.oc.5M <- rbind(raw.oc.t3410.5M, raw.oc.t3510.5M) 
+
+
+
+rm(raw.oc.t3410.5M)
+rm(raw.oc.t3510.5M) 
+
+
+data.ts.ocr.5M <- raw.oc.5M %>%
+  group_by(OCR_ID) %>%
+  arrange(Date.Time) %>%
+  filter(row_number() %% 2 == 1) %>%
+  mutate(OCR.ts = (lag(DO) - DO) * 295, Period = row_number() * 2) %>%
+  na.omit() %>%
+  select(OCR_ID, Period, OCR.ts) %>%
+  filter(Period %in% seq(10, 60, 2)) # delete first 10 min data which DO dropped in control group.
+
+
+data.ts.sum.5M <- merge(select(data_base.5M, UniID, OCR_ID, Age, Gender, Mass, Length, Group), data.ts.dis.5M)
+data.ts.sum.5M <- merge(data.ts.sum.5M, data.ts.ocr.5M) %>%
+  mutate(Distance_2min = distance.2min,
+         Group = if_else(Group == "control", "Control", "Overfeeding"),
+         Group = factor(Group, levels = c("Control", "Overfeeding")))
+
+data.sum.5M <- data.ts.sum.5M %>%
+  group_by(Group, UniID, OCR_ID, Age, Gender, Mass, Length) %>%
+  summarise(OCR = sum(OCR.ts)/(5/6), Distance.1h = sum(Distance_2min)/(5/6)) %>%
+  mutate(
+         OCR.per.mass = OCR/Mass
+         )
+```
+
+
+## import aged data
+
+```{r, message=FALSE, warning=FALSE}
+
+path = "input"
+fileNames <- list.files(path=path, pattern="*.csv")
+filePath <- sapply(fileNames, function(x){
+  paste(path,x,sep='/')})
+
+data.14MOF <- read.csv("input/180223_raw.csv") %>%
+  mutate(BMI_pre = Mass_pre/(Length_pre)^2,
+         BMI_post = Mass_post/(Length_post)^2)
+
+target <- data.14MOF$OCR_ID
+
+raw.oc.14MOF <- read.csv("input/180223_SDOF_OCR_oxygen.csv", fileEncoding = "latin1")
+# raw.oc.14MOF <- read.csv("input/180223_SDOF_OCR_oxygen.csv")
+
+raw.oc.14MOF <- raw.oc.14MOF %>%
+  filter(ID %in% target) %>%
+  arrange(ID, Date.Time) %>%
+  select(OCR_ID = ID, DO = Value, Temperature = Value2, Date.Time, Device.serial)
+
+raw.oc.t3410.14MOF <- raw.oc.14MOF %>%
+  filter(Device.serial == 15390906) %>%
+  group_by(OCR_ID) %>%
+  arrange(Date.Time) %>%  
+  slice(4:n()-1)
+  
+raw.oc.t3510.14MOF <- raw.oc.14MOF %>%
+  filter(Device.serial != 15390906) %>%
+  group_by(OCR_ID) %>%
+  arrange(Date.Time) %>%  
+  slice(3:n()-1)
+
+
+raw.oc.14MOF <- rbind(raw.oc.t3410.14MOF, raw.oc.t3510.14MOF) 
+
+rm(raw.oc.t3410.14MOF)
+rm(raw.oc.t3510.14MOF)  
+
+
+data.ts.ocr.14MOF <- raw.oc.14MOF %>%
+  group_by(OCR_ID) %>%
+  arrange(Date.Time) %>%
+  filter(row_number() %% 2 == 1) %>%
+  mutate(OCR.ts = (lag(DO) - DO) * 295, Period = row_number() * 2) %>%
+  na.omit() %>%
+  select(OCR_ID, Period, OCR.ts) %>%
+  filter(Period %in% seq(10, 60, 2)) # delete first 10 min data which DO dropped in control group.
+
+
+raw.dis.14MOF <- read.csv("input/distance.csv") %>% select(-X)
+
+target <- data.14MOF$fish.ID
+
+raw.dis.14MOF <- raw.dis.14MOF %>%
+  select(Period = sep.by.2min, fish.ID = fish.ID, distance.2min) %>%
+  filter(fish.ID %in% target) %>%
+  arrange(fish.ID, Period)
+
+raw.dis.14MOF$distance.2min <- as.numeric(as.character(raw.dis.14MOF$distance.2min))
+data.ts.dis.14MOF <- raw.dis.14MOF %>%
+  filter(Period != 2) %>%
+  filter(Period %in% seq(10, 60, 2)) # delete first 10 min data which DO dropped in control group.
+  
+data.ts.sum.14MOF <- merge(select(data.14MOF, fish.ID, UniID, OCR_ID, Age, Genetype, Gender, Mass_pre, Length_pre, Mass_post, Length_post, BMI_pre, BMI_post), data.ts.dis.14MOF)
+data.ts.sum.14MOF <- merge(data.ts.sum.14MOF, data.ts.ocr.14MOF)
+data.ts.sum.14MOF <- data.ts.sum.14MOF %>% mutate(group = sub("[0123456789]","",fish.ID))
+data.14MOF <- data.ts.sum.14MOF %>%
+  group_by(fish.ID, UniID, OCR_ID, Age, Genetype, Gender,Mass_pre, Length_pre, Mass_post, Length_post, BMI_pre, BMI_post) %>%
+  summarise(OCR = sum(OCR.ts), Distance.1h = sum(distance.2min)) %>%
+  mutate(group = sub("[0123456789]","",fish.ID),
+         OCR.per.mass = OCR/Mass_post,
+         BMI.pre.post.ratio = BMI_post/BMI_pre)
+
+```
+
+
+## Data manipulation
+```{r, message=FALSE, warning=FALSE}
+## join data.1h
+data.1h.5M <- data.sum.5M %>%
+  select(OCR_ID, UniID, Mass, Age, Gender, Length, Group, OCR, OCR_per_mass = OCR.per.mass, Distance_1h = Distance.1h) %>%
+  ungroup() %>%
+  mutate(Age_new = "Young",
+         Age = "5-months",
+         Gender = NA_character_)
+data.1h.5M$Age <- as.character(data.1h.5M$Age)
+
+data.1h.14M <- data.14MOF %>%
+  ungroup() %>%
+  select(OCR_ID, UniID, Mass = Mass_post, Age, Genetype, Gender, Length = Length_post, Group = group, BMI = BMI_post, OCR, OCR_per_mass = OCR.per.mass,   Distance_1h = Distance.1h) %>%
+  mutate(Age_new = "Aged") %>%
+  filter(Group == "noSDnoOF" | Group == "noSDOF") %>%
+  mutate(Group = if_else(Group == "noSDnoOF", "Control", "Overfeeding"))
+  
+data.1h.14M$Age <- as.character(data.1h.14M$Age)
+
+data.1h <- full_join(data.1h.5M, data.1h.14M) %>%
+  mutate(BMI = Mass/(Length)^2)
+
+
+## join data.2min
+
+data.2min.5M <- data.ts.sum.5M %>%
+  select(OCR_ID, Period, UniID, Mass, Age, Gender, Length, Group, OCR_ts = OCR.ts, Distance_2min) %>%
+  mutate(Age_new = "Young",
+         Age = "5-months",
+         Gender = NA_character_)
+data.2min.5M$Age <- as.character(data.2min.5M$Age)
+
+data.2min.14M <- data.ts.sum.14MOF %>%
+  ungroup() %>%
+  select(OCR_ID, Period, UniID, Mass = Mass_post, Age, Genetype, Gender, Length = Length_post, Group = group, BMI = BMI_post, OCR_ts = OCR.ts,   Distance_2min = distance.2min) %>%
+  mutate(Age_new = "Aged") %>%
+  filter(Group == "noSDnoOF" | Group == "noSDOF") %>%
+  mutate(Group = if_else(Group == "noSDnoOF", "Control", "Overfeeding"))
+  
+data.2min.14M$Age <- as.character(data.2min.14M$Age)
+
+data.2min <- full_join(data.2min.5M, data.2min.14M)
+
+
+## change unit of data.2min
+
+data.2min <- data.2min %>%
+  mutate(
+      BMI = Mass/(Length)^2,
+      Distance_2min = Distance_2min/2/60,
+      OCR_ts = OCR_ts/2,
+      OCR_per_mass_ts = OCR_ts/Mass)
+
+data.1h$Age_new <- factor(data.1h$Age_new, levels = c("Young", "Aged"))
+data.2min$Age_new <- factor(data.2min$Age_new, levels = c("Young", "Aged"))
+
+```
+
+
+# Data visualization
+```{r}
+
+p_mass <- ggplot(data.1h, aes(Age_new, Mass, fill = Group)) +
+  stat_summary(fun.y = mean, geom = "bar", position = position_dodge()) + 
+  stat_summary(fun.data = mean_se, geom = "errorbar", color = "gray20", width = 0.25, position = position_dodge(0.9)) + 
+  stat_compare_means(aes(group = Group), label = "p.signif") +
+  labs(
+       x = NULL,
+       y = "Mass (g)"
+   ) +
+  scale_fill_colorblind() +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(axis.text.x = element_text(colour = "black", angle = 45, hjust = 1))
+
+p_mass
+
+compare_means(Mass~Group, data.1h, group.by = "Age_new", method = "t.test")
+```
+
+
+
+```{r}
+p_Length <- ggplot(data.1h, aes(Age_new, Length, fill = Group)) +
+  stat_summary(fun.y = mean, geom = "bar", position = position_dodge()) + 
+  stat_summary(fun.data = mean_se, geom = "errorbar", color = "gray20", width = 0.25, position = position_dodge(0.9)) + 
+  labs(
+       x = NULL,
+       y = "Length (cm)"
+   ) +
+  scale_fill_colorblind() +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(axis.text.x = element_text(colour = "black", angle = 45, hjust = 1))
+
+p_Length
+
+compare_means(Length~Group, data.1h, group.by = "Age_new", method = "t.test")
+```
+
+
+
+```{r}
+p_BMI <- ggplot(data.1h, aes(Age_new, BMI, fill = Group)) +
+  stat_summary(fun.y = mean, geom = "bar", position = position_dodge()) + 
+  stat_summary(fun.data = mean_se, geom = "errorbar", color = "gray20", width = 0.25, position = position_dodge(0.9)) + 
+  labs(
+       x = NULL,
+       y = "BMI "~(g/cm^2)~""
+   ) +
+  scale_fill_colorblind() +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(axis.text.x = element_text(colour = "black", angle = 45, hjust = 1))
+
+p_BMI
+
+compare_means(BMI~Group, data.1h, group.by = "Age_new", method = "t.test")
+```
+
+
+```{r}
+p_OCR <- ggplot(data.1h, aes(Age_new, OCR, fill = Group)) +
+  stat_summary(fun.y = mean, geom = "bar", position = position_dodge()) + 
+  stat_summary(fun.data = mean_se, geom = "errorbar", color = "gray20", width = 0.25, position = position_dodge(0.9)) + 
+  labs(
+       x = NULL,
+       y = "Oxygen consumption rate\n(ug/fish/h)"
+   ) +
+  scale_fill_colorblind() +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(axis.text.x = element_text(colour = "black", angle = 45, hjust = 1))
+
+p_OCR
+
+compare_means(OCR~Group, data.1h, group.by = "Age_new", method = "t.test")
+```
+
+
+
+
+```{r}
+
+
+
+p_distance <- ggplot(data.1h, aes(Age_new, Distance_1h, fill = Group)) +
+  stat_summary(fun.y = mean, geom = "bar", position = position_dodge()) + 
+  stat_summary(fun.data = mean_se, geom = "errorbar", color = "gray20", width = 0.25, position = position_dodge(0.9)) + 
+  labs(
+       x = NULL,
+       y = "Distance moved (cm/h)"
+   ) +
+  scale_fill_colorblind() +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(axis.text.x = element_text(colour = "black", angle = 45, hjust = 1)) +
+  annotate("text", x=2, y= 9000, label="*", size = 10, alpha = 0)
+
+p_distance
+
+compare_means(Distance_1h~Group, data.1h, group.by = "Age_new", method = "t.test")
+```
+
+
+```{r}
+## time lag shift
+data.2min_timelag2min <- data.2min %>%
+  group_by(UniID) %>%
+  mutate(OCR_ts_timelag2min = lead(OCR_ts, 1),
+         OCR_ts_per_mass_timelag2min = OCR_ts_timelag2min/Mass) %>%
+  filter(!is.na(OCR_ts_timelag2min))
+  
+## plot
+data.2min.filtered <- data.2min_timelag2min %>%
+  mutate(Distance_2min_disp = if_else(Distance_2min <= 2, "(0,2]", "(2, inf)")) %>%
+  filter(Distance_2min_disp == "(0,2]")
+  
+
+p_OCR_per_mass_ts <- ggplot(data.2min.filtered, aes(Age_new, OCR_ts_per_mass_timelag2min, fill = Group)) +
+  stat_summary(fun.y = mean, geom = "bar", position = position_dodge()) + 
+  stat_summary(fun.data = mean_se, geom = "errorbar", color = "gray20", width = 0.25, position = position_dodge(0.9)) + 
+  labs(
+       x = NULL,
+       y = "Metabolic Rate \n(Low-Movement)  (ug/g/min)"
+   ) +
+  scale_fill_colorblind() +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(axis.text.x = element_text(colour = "black", angle = 45, hjust = 1)) +
+  annotate("text", x=1, y= 18, label="*", size = 10, alpha = 0)
+
+compare_means(OCR_ts_per_mass_timelag2min~Group, data.2min.filtered, group.by = "Age_new")
+
+summary(aov(OCR_ts_per_mass_timelag2min ~ Group*Period + Error(UniID/(Period)), data=filter(data.2min.filtered, Age_new == "Aged")))
+summary(aov(OCR_ts_per_mass_timelag2min ~ Group*Period + Error(UniID/(Period)), data=filter(data.2min.filtered, Age_new == "Young")))
+```
+
+
+## Arranging graphs into a grid
+```{r}
+p_OF_legend <- get_legend(p_mass)
+p_OF <- plot_grid(p_mass + theme(legend.position = "none"), 
+                  p_Length + theme(legend.position = "none"),
+                  p_BMI + theme(legend.position = "none"),
+                  p_OCR + theme(legend.position = "none"), 
+                  p_distance + theme(legend.position = "none"), 
+                  p_OCR_per_mass_ts + theme(legend.position = "none"),
+                  labels = "AUTO", align = "hv")
+
+p_OF
+```
